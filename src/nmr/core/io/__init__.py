@@ -17,7 +17,7 @@ def load(path: str | Path) -> Dataset:
     """Load a 1D data set from a Bruker folder (or a file inside one) or a JCAMP-DX file."""
     path = Path(path)
     if not path.exists():
-        raise LoadError(f"Pfad nicht gefunden: {path}")
+        raise LoadError(f"Path not found: {path}")
 
     if path.is_dir():
         return _load_bruker_dir(path)
@@ -29,7 +29,7 @@ def load(path: str | Path) -> Dataset:
         return bruker.load_fid(path.parent)
     if name in BRUKER_PROCESSED_FILES:
         return bruker.load_processed(path.parent)
-    raise LoadError(f"Unbekanntes Dateiformat: {path.name}")
+    raise LoadError(f"Unknown file format: {path.name}")
 
 
 def _load_bruker_dir(folder: Path) -> Dataset:
@@ -38,7 +38,7 @@ def _load_bruker_dir(folder: Path) -> Dataset:
     if (folder / "1r").is_file():
         return bruker.load_processed(folder)
     if (folder / "ser").is_file():
-        raise LoadError("Das ist ein 2D-Experiment; bisher werden nur 1D-Daten unterstützt.")
+        raise LoadError("This is a 2D experiment; only 1D data is supported so far.")
 
     # A sample folder holding numbered experiments: open it if there is exactly one.
     experiments = sorted(p for p in folder.iterdir() if (p / "fid").is_file())
@@ -46,5 +46,7 @@ def _load_bruker_dir(folder: Path) -> Dataset:
         return bruker.load_fid(experiments[0])
     if experiments:
         names = ", ".join(p.name for p in experiments)
-        raise LoadError(f"Der Ordner enthält mehrere Experimente ({names}). Bitte eines auswählen.")
-    raise LoadError(f"Keine Bruker-Daten (fid oder 1r) in {folder} gefunden.")
+        raise LoadError(
+            f"The folder contains several experiments ({names}). Please open one of them."
+        )
+    raise LoadError(f"No Bruker data (fid or 1r) found in {folder}.")

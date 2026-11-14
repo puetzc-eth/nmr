@@ -18,17 +18,17 @@ def load(path: Path) -> Dataset:
             warnings.simplefilter("ignore", UserWarning)
             dic, data = ng.jcampdx.read(str(path))
     except Exception as exc:
-        raise LoadError(f"JCAMP-Datei konnte nicht gelesen werden: {exc}") from exc
+        raise LoadError(f"Could not read the JCAMP-DX file: {exc}") from exc
 
     # NTUPLES files carry real and imaginary parts, XYDATA files only one array.
     if isinstance(data, list):
         if not data or data[0].ndim != 1:
-            raise LoadError("Die JCAMP-Datei enthält keine 1D-Daten.")
+            raise LoadError("The JCAMP-DX file does not contain 1D data.")
         values = data[0] + 1j * data[1] if len(data) > 1 else data[0]
         first, last, x_units = (_ntuple_x(dic, key) for key in ("FIRST", "LAST", "UNITS"))
     else:
         if data.ndim != 1:
-            raise LoadError("Die JCAMP-Datei enthält keine 1D-Daten.")
+            raise LoadError("The JCAMP-DX file does not contain 1D data.")
         values = data
         first, last, x_units = (_get(dic, key) for key in ("FIRSTX", "LASTX", "XUNITS"))
 
@@ -36,11 +36,13 @@ def load(path: Path) -> Dataset:
         obs_freq = float(_get(dic, ".OBSERVEFREQUENCY"))
         first, last = float(first), float(last)
     except (TypeError, ValueError) as exc:
-        raise LoadError("In der JCAMP-Datei fehlen Angaben zu Messfrequenz oder X-Achse.") from exc
+        raise LoadError("The JCAMP-DX file lacks the observe frequency or the x axis.") from exc
 
     data_type = (_get(dic, "DATATYPE") or "").upper()
     if "NMR" not in data_type:
-        raise LoadError(f"Die JCAMP-Datei enthält keine NMR-Daten ({data_type or 'unbekannt'}).")
+        raise LoadError(
+            f"The JCAMP-DX file does not contain NMR data ({data_type or 'unknown type'})."
+        )
 
     n = values.shape[0]
     span = abs(last - first) * n / (n - 1)

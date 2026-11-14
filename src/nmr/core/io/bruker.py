@@ -13,9 +13,9 @@ def load_fid(folder: Path) -> Dataset:
     try:
         dic, data = ng.bruker.read(str(folder))
     except Exception as exc:
-        raise LoadError(f"Bruker-FID konnte nicht gelesen werden: {exc}") from exc
+        raise LoadError(f"Could not read the Bruker FID: {exc}") from exc
     if data.ndim != 1:
-        raise LoadError("Das ist kein 1D-Experiment.")
+        raise LoadError("This is not a 1D experiment.")
 
     acqus = dic["acqus"]
     ref_freq = float(acqus["BF1"])
@@ -43,10 +43,10 @@ def load_processed(pdata_folder: Path) -> Dataset:
     try:
         dic, parts = ng.bruker.read_pdata(str(pdata_folder), all_components=True)
     except Exception as exc:
-        raise LoadError(f"Bruker-Spektrum konnte nicht gelesen werden: {exc}") from exc
+        raise LoadError(f"Could not read the Bruker spectrum: {exc}") from exc
     real = parts[0]
     if real.ndim != 1:
-        raise LoadError("Das ist kein 1D-Spektrum.")
+        raise LoadError("This is not a 1D spectrum.")
     data = real + 1j * parts[1] if len(parts) > 1 else real
 
     procs = dic["procs"]
