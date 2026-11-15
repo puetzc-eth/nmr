@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QGroupBox,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -57,7 +58,6 @@ class ProcessingPanel(QWidget):
 
         self.baseline = QCheckBox("Subtract polynomial")
         self.baseline_order = QSpinBox()
-        self.baseline_order.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
         self.baseline_order.setRange(0, 9)
         self.baseline_order.setValue(DEFAULT_BASELINE_ORDER)
         self.baseline_group = QGroupBox("Baseline correction")
@@ -70,7 +70,8 @@ class ProcessingPanel(QWidget):
         layout.setSpacing(6)
         for group in (self.transform_group, self.phase_group, self.baseline_group):
             layout.addWidget(group)
-        layout.addStretch()
+        # Take only the height the settings need; the rest goes to the panels below.
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
 
         # Each widget changes only its own setting, so the rounding of the displayed
         # numbers never leaks into the others.
@@ -134,8 +135,6 @@ def _spin(
     low: float, high: float, step: float, suffix: str, *, wrapping: bool = False
 ) -> QDoubleSpinBox:
     spin = QDoubleSpinBox()
-    # Values are stepped with the arrow keys or the mouse wheel; no tiny buttons.
-    spin.setButtonSymbols(QDoubleSpinBox.ButtonSymbols.NoButtons)
     spin.setRange(low, high)
     spin.setSingleStep(step)
     spin.setDecimals(2)

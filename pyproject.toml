@@ -34,6 +34,8 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 qt_api = "pyside6"
+# A forgotten modal dialog would otherwise hang the test run forever.
+faulthandler_timeout = 60
 
 [tool.ruff]
 line-length = 100

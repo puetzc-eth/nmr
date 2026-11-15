@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QLabel
 
 from nmr.core.dataset import Dataset
 from nmr.gui import theme
+from nmr.gui.integral_layer import IntegralLayer
 
 _SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
 
@@ -32,6 +33,7 @@ class Tool(Enum):
     CROSSHAIR = "crosshair"
     PHASE = "phase"
     REFERENCE = "reference"
+    INTEGRATE = "integrate"
 
 
 ZOOM_MODES = ("horizontal", "vertical", "box")
@@ -44,6 +46,7 @@ _CURSORS = {
     Tool.CROSSHAIR: Qt.CursorShape.CrossCursor,
     Tool.PHASE: Qt.CursorShape.SizeVerCursor,
     Tool.REFERENCE: Qt.CursorShape.PointingHandCursor,
+    Tool.INTEGRATE: Qt.CursorShape.SplitHCursor,
 }
 
 
@@ -74,6 +77,8 @@ class SpectrumView(pg.PlotWidget):
     """Change of (ph0, ph1) in degrees since the last event."""
     pivot_picked = Signal(float)
     reference_picked = Signal(float)
+    region_selected = Signal(float, float)
+    """Both ends of a region dragged with the integrate tool."""
 
     def __init__(self) -> None:
         view_box = _ViewBox()
@@ -99,7 +104,9 @@ class SpectrumView(pg.PlotWidget):
         # NMR convention: chemical shift increases to the left.
         self.vb.invertX(True)
 
-        self.curve = self.plot(pen=pg.mkPen(theme.SPECTRUM, width=1.2), antialias=True)
+        # A pen wider than one pixel makes Qt draw the curve an order of magnitude
+        # slower, which is felt as lag on every pan, zoom and phase step.
+        self.curve = self.plot(pen=pg.mkPen(theme.SPECTRUM, width=1), antialias=True)
         # Keep interaction smooth with several hundred thousand points.
         self.curve.setDownsampling(auto=True, method="peak")
         self.curve.setClipToView(True)
@@ -122,6 +129,7 @@ class SpectrumView(pg.PlotWidget):
         self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
+        self.integrals = IntegralLayer(self)
         self.scene().sigMouseMoved.connect(self._on_mouse_moved)
 
     # ---- data -------------------------------------------------------------------
@@ -148,6 +156,14 @@ class SpectrumView(pg.PlotWidget):
         if not keep_view:
             self.show_full()
 
+    def clear_dataset(self) -> None:
+        """Back to the empty state with the drop hint."""
+        self._y = None
+        self._x_full = None
+        self.curve.setData([], [])
+        self.hideAxis("bottom")
+        self._hint.show()
+
     # ---- view commands ------------------------------------------------------------
 
     def show_full(self) -> None:
@@ -168,7 +184,8 @@ class SpectrumView(pg.PlotWidget):
             return
         top, bottom = float(visible.max()), min(float(visible.min()), 0.0)
         span = max(top - bottom, 1e-12)
-        self.vb.setRange(yRange=(bottom - 0.04 * span, top + 0.06 * span), padding=0)
+        # The room below the baseline holds the integral labels.
+        self.vb.setRange(yRange=(bottom - 0.09 * span, top + 0.06 * span), padding=0)
 
     def scale_intensity(self, factor: float) -> None:
         """Multiply the displayed intensity; the zero line stays where it is."""
@@ -233,6 +250,8 @@ class SpectrumView(pg.PlotWidget):
             ev.ignore()
         elif self.tool is Tool.ZOOM:
             self._drag_zoom(ev)
+        elif self.tool is Tool.INTEGRATE:
+            self._drag_integrate(ev)
         elif self.tool is Tool.CROSSHAIR:
             self._drag_measure(ev)
         elif self.tool in (Tool.SELECT, Tool.PAN):
@@ -241,28 +260,39 @@ class SpectrumView(pg.PlotWidget):
             ev.ignore()
 
     def _drag_zoom(self, ev) -> None:
-        ev.accept()
-        start, end = ev.buttonDownPos(Qt.MouseButton.LeftButton), ev.pos()
-        bounds = self.vb.boundingRect()
         horizontal = self.zoom_mode in ("horizontal", "box")
         vertical = self.zoom_mode in ("vertical", "box")
-        p1 = QPointF(start.x() if horizontal else bounds.left(), start.y() if vertical else 0.0)
-        p2 = QPointF(
-            end.x() if horizontal else bounds.right(), end.y() if vertical else bounds.height()
-        )
-        if not ev.isFinish():
-            self.vb.updateScaleBox(p1, p2)
+        target = self._drag_band(ev, horizontal=horizontal, vertical=vertical)
+        if target is None:
             return
-        self.vb.rbScaleBox.hide()
-        if (horizontal and abs(p1.x() - p2.x()) < 4) or (vertical and abs(p1.y() - p2.y()) < 4):
-            return
-        target = self.vb.childGroup.mapRectFromParent(QRectF(p1, p2).normalized())
         ranges = {}
         if horizontal:
             ranges["xRange"] = sorted((target.left(), target.right()))
         if vertical:
             ranges["yRange"] = sorted((target.top(), target.bottom()))
         self.vb.setRange(padding=0, **ranges)
+
+    def _drag_integrate(self, ev) -> None:
+        target = self._drag_band(ev, horizontal=True, vertical=False)
+        if target is not None:
+            self.region_selected.emit(target.left(), target.right())
+
+    def _drag_band(self, ev, *, horizontal: bool, vertical: bool) -> QRectF | None:
+        """Rubber-band selection. Returns the selected view rectangle when the drag ends."""
+        ev.accept()
+        start, end = ev.buttonDownPos(Qt.MouseButton.LeftButton), ev.pos()
+        bounds = self.vb.boundingRect()
+        p1 = QPointF(start.x() if horizontal else bounds.left(), start.y() if vertical else 0.0)
+        p2 = QPointF(
+            end.x() if horizontal else bounds.right(), end.y() if vertical else bounds.height()
+        )
+        if not ev.isFinish():
+            self.vb.updateScaleBox(p1, p2)
+            return None
+        self.vb.rbScaleBox.hide()
+        if (horizontal and abs(p1.x() - p2.x()) < 4) or (vertical and abs(p1.y() - p2.y()) < 4):
+            return None
+        return self.vb.childGroup.mapRectFromParent(QRectF(p1, p2).normalized())
 
     def _drag_pan(self, ev, mode: str) -> None:
         ev.accept()

@@ -45,10 +45,22 @@ SHORTCUTS: list[tuple[str, list[tuple[str, str]]]] = [
         ],
     ),
     (
+        "Analysis",
+        [
+            ("I", "Integration: drag across a signal"),
+            ("Delete", "Remove the integral selected in the table"),
+        ],
+    ),
+    (
         "File and edit",
         [
-            ("Ctrl+O", "Open a file"),
-            ("Ctrl+Shift+O", "Open a Bruker folder"),
+            ("Ctrl+N", "New, empty project"),
+            ("Ctrl+O", "Open a project, or import data files and ZIP archives"),
+            ("Ctrl+Shift+O", "Import a data folder"),
+            ("Ctrl+S", "Save the project"),
+            ("Ctrl+Shift+S", "Save the project under a new name"),
+            ("PgUp / PgDown", "Previous / next spectrum"),
+            ("Delete", "Remove the spectrum selected in the list"),
             ("Ctrl+Z", "Undo"),
             ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),
             ("Ctrl+C", "Copy the spectrum as an image"),

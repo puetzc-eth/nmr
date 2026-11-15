@@ -38,11 +38,26 @@ pytest
 ruff check .
 ```
 
+## Project files
+
+Data is imported by opening or dropping the original instrument files (Bruker folders,
+JCAMP-DX files, ZIP archives of either). The originals are only read, never changed.
+
+A project is saved as a `.nmrx` file, which is a plain ZIP archive:
+
+| Entry | Content |
+|---|---|
+| `manifest.json` | Format version and the list of spectra |
+| `001/data/…` | Unmodified copy of the original instrument files of the first spectrum |
+| `001/state.json` | Its processing settings and integrals |
+
+Spectra are recomputed from the original data and the settings when a project is opened.
+
 ## Layout
 
 | Path | Purpose |
 |---|---|
-| `src/nmr/core/` | File import, processing and analysis. No GUI imports, usable from scripts and notebooks. |
+| `src/nmr/core/` | File import, processing, analysis and the project file. No GUI imports, usable from scripts and notebooks. |
 | `src/nmr/gui/` | Desktop application (PySide6 + pyqtgraph). |
 | `tests/` | pytest suite. |
 | `tests/data/` | Real example spectra (third-party, MIT, see `tests/data/README.md`). |

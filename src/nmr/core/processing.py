@@ -99,28 +99,50 @@ def auto_phase(dataset: Dataset, params: ProcessingParams) -> ProcessingParams:
     Minimises the entropy of the spectrum's derivative plus a penalty for negative
     intensity (the ACME criterion, Chen et al., J. Magn. Reson. 2002, 158, 164).
     """
-    spectrum = fourier_transform(dataset, params) if dataset.domain == "time" else dataset
+    if dataset.domain == "time":
+        # The phase does not depend on zero filling, so search on the smallest spectrum.
+        spectrum = fourier_transform(dataset, replace(params, zero_fill_factor=1))
+    else:
+        spectrum = dataset
     data = spectrum.data
     if not np.iscomplexobj(data):
         return params
     data = data / np.abs(data).max()
     n = data.shape[0]
     pivot_index = int(np.argmax(np.abs(data)))
+    pivot_ppm = float(spectrum.ppm_axis[pivot_index]) + params.reference_shift_ppm
     ramp = (np.arange(n) - pivot_index) / n
 
-    def score(phases: np.ndarray) -> float:
-        real = (data * np.exp(1j * np.deg2rad(phases[0] + phases[1] * ramp))).real
+    # Only the neighbourhood of signals says anything about the phase. Most of a
+    # spectrum is noise, so leaving it out makes the search several times faster.
+    magnitude = np.abs(data)
+    near_signal = maximum_filter1d(magnitude, max(16, n // 256)) > 6.0 * np.median(magnitude)
+    if 64 < near_signal.sum() < 0.6 * n:
+        data, ramp = data[near_signal], ramp[near_signal]
+
+    def score_real(real: np.ndarray) -> float:
         slope = np.abs(np.diff(real))
         p = slope / slope.sum()
         entropy = -np.sum(p * np.log(p + 1e-300))
         negative = real[real < 0]
         return entropy + 1000.0 * np.sum(negative**2)
 
+    def score(phases: np.ndarray) -> float:
+        return score_real((data * np.exp(1j * np.deg2rad(phases[0] + phases[1] * ramp))).real)
+
     # The criterion has local minima, so start from the best points of a coarse grid.
-    grid = [(ph0, ph1) for ph1 in range(-360, 361, 60) for ph0 in range(0, 360, 20)]
-    starts = sorted(grid, key=lambda g: score(np.array(g, dtype=float)))[:3]
+    # The first-order rotation is the expensive part and is shared by a whole grid row.
+    grid = []
+    for ph1 in range(-360, 361, 60):
+        rotated = data * np.exp(1j * np.deg2rad(ph1 * ramp))
+        for ph0 in range(0, 360, 20):
+            angle = np.deg2rad(ph0)
+            real = np.cos(angle) * rotated.real - np.sin(angle) * rotated.imag
+            grid.append((score_real(real), ph0, ph1))
+    starts = [(ph0, ph1) for _, ph0, ph1 in sorted(grid)[:2]]
+    options = {"xatol": 0.05, "fatol": 1e-6}
     best = min(
-        (minimize(score, start, method="Nelder-Mead", options={"xatol": 0.01}) for start in starts),
+        (minimize(score, start, method="Nelder-Mead", options=options) for start in starts),
         key=lambda result: result.fun,
     )
     ph0 = (best.x[0] + 180.0) % 360.0 - 180.0
@@ -128,7 +150,7 @@ def auto_phase(dataset: Dataset, params: ProcessingParams) -> ProcessingParams:
         params,
         ph0_deg=float(ph0),
         ph1_deg=float(best.x[1]),
-        pivot_ppm=float(spectrum.ppm_axis[pivot_index]) + params.reference_shift_ppm,
+        pivot_ppm=pivot_ppm,
     )
 
 

@@ -1,37 +1,55 @@
 """Main application window."""
 
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QActionGroup, QDragEnterEvent, QDropEvent, QKeySequence
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QCloseEvent,
+    QDragEnterEvent,
+    QDropEvent,
+    QKeySequence,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QDockWidget,
     QFileDialog,
+    QFrame,
     QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QScrollArea,
     QToolBar,
 )
 
 from nmr import __version__
 from nmr.core.dataset import Dataset
-from nmr.core.io import LoadError, load
+from nmr.core.document import PROJECT_SUFFIX, Document, Entry
+from nmr.core.integration import IntegralSet, evaluate
+from nmr.core.io import LoadError
 from nmr.core.processing import (
     ProcessingParams,
     auto_phase,
-    default_params,
+    fourier_transform,
     process,
     shift_reference,
 )
+from nmr.gui.integrals_panel import IntegralsPanel
 from nmr.gui.processing_panel import ProcessingPanel
 from nmr.gui.shortcuts_dialog import ShortcutsDialog
+from nmr.gui.spectra_panel import SpectraPanel
 from nmr.gui.spectrum_view import WHEEL_STEP, SpectrumView, Tool, format_nucleus
 
-FILE_FILTER = "NMR data (*.dx *.jdx *.jcamp fid 1r);;All files (*)"
+SIDEBAR_WIDTH = 300
+PROJECT_FILTER = f"nmr project (*{PROJECT_SUFFIX})"
+OPEN_FILTER = (
+    f"All supported (*{PROJECT_SUFFIX} *.dx *.jdx *.jcamp *.zip fid 1r);;"
+    f"{PROJECT_FILTER};;JCAMP-DX (*.dx *.jdx *.jcamp);;ZIP archive (*.zip);;All files (*)"
+)
 
 TOOL_HINTS = {
     Tool.SELECT: "",
@@ -43,24 +61,41 @@ TOOL_HINTS = {
         "click to set the pivot. Hold Shift for fine steps."
     ),
     Tool.REFERENCE: "Reference: click a signal to set its chemical shift.",
+    Tool.INTEGRATE: (
+        "Integrate: drag across a signal. Edit a value in the table to normalise, "
+        "select a row and press Delete to remove it."
+    ),
 }
+
+Snapshot = tuple[ProcessingParams, IntegralSet]
+
+
+@dataclass
+class _Session:
+    """What the window keeps per spectrum while the document is open; never saved."""
+
+    undo: list[Snapshot] = field(default_factory=list)
+    redo: list[Snapshot] = field(default_factory=list)
+    spectrum: Dataset | None = None
+    transform_key: tuple | None = None
+    transformed: Dataset | None = None
+
+
+def _session(entry: Entry) -> _Session:
+    return entry.runtime.setdefault("session", _Session())
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("nmr")
-        self.resize(1280, 760)
+        self.resize(1400, 800)
         self.setAcceptDrops(True)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
 
-        self.dataset: Dataset | None = None
-        """The data as loaded from disk; never modified."""
-        self.params = ProcessingParams()
-        self.spectrum: Dataset | None = None
-        """`dataset` processed with `params`."""
-        self._undo: list[ProcessingParams] = []
-        self._redo: list[ProcessingParams] = []
+        self.document = Document()
+        self.current = -1
+        """Index of the spectrum being shown, -1 if the document is empty."""
+        self.modified = False
 
         self.plot = SpectrumView()
         self.setCentralWidget(self.plot)
@@ -70,22 +105,40 @@ class MainWindow(QMainWindow):
         self.plot.phase_dragged.connect(self._on_phase_dragged)
         self.plot.pivot_picked.connect(self._set_pivot)
         self.plot.reference_picked.connect(self._reference_at)
+        self.plot.region_selected.connect(self._add_integral)
+
+        self.spectra_panel = SpectraPanel()
+        self.spectra_panel.current_changed.connect(self.select)
+        self.spectra_panel.remove_requested.connect(self.remove_spectrum)
+        self.spectra_dock = self._add_dock(
+            "SPECTRA", self.spectra_panel, Qt.DockWidgetArea.LeftDockWidgetArea
+        )
 
         self.panel = ProcessingPanel()
         self.panel.params_changed.connect(self.set_params)
         self.panel.auto_phase_requested.connect(self.auto_phase)
-        self.dock = QDockWidget("PROCESSING", self)
-        self.dock.setWidget(self.panel)
-        self.dock.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QDockWidget.DockWidgetFeature.DockWidgetClosable
-        )
-        self.dock.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
-        )
-        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
+        # Scrollable, so the settings never squeeze the integral table out of view.
+        scroll = QScrollArea()
+        scroll.setWidget(self.panel)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setMinimumWidth(SIDEBAR_WIDTH)
+        self.dock = self._add_dock("PROCESSING", scroll)
 
-        self._info = QLabel("No data loaded")
+        self.integrals_panel = IntegralsPanel()
+        self.integrals_panel.setMinimumWidth(SIDEBAR_WIDTH)
+        self.integrals_panel.reference_changed.connect(
+            lambda index, value: self.set_integrals(self.integrals.with_reference(index, value))
+        )
+        self.integrals_panel.delete_requested.connect(
+            lambda index: self.set_integrals(self.integrals.remove(index))
+        )
+        self.integrals_panel.clear_requested.connect(lambda: self.set_integrals(IntegralSet()))
+        self.integrals_dock = self._add_dock("INTEGRALS", self.integrals_panel)
+        self.resizeDocks([self.dock, self.integrals_dock], [460, 240], Qt.Orientation.Vertical)
+
+        self._info = QLabel()
         self._hint = QLabel()
         self._cursor = QLabel()
         self.statusBar().addWidget(self._info)
@@ -96,82 +149,257 @@ class MainWindow(QMainWindow):
         self._build_actions()
         self._build_menus()
         self._build_toolbar()
-        self._update_enabled()
+        self._show_current(keep_view=False)
 
-    # ---- data and processing ----------------------------------------------------------
+    # ---- the current spectrum -----------------------------------------------------------
+
+    @property
+    def entry(self) -> Entry | None:
+        if 0 <= self.current < len(self.document.entries):
+            return self.document.entries[self.current]
+        return None
+
+    @property
+    def dataset(self) -> Dataset | None:
+        """The current data as loaded from the original files; never modified."""
+        return self.entry.dataset if self.entry else None
+
+    @property
+    def spectrum(self) -> Dataset | None:
+        """The current data processed with the current settings."""
+        return _session(self.entry).spectrum if self.entry else None
+
+    @property
+    def params(self) -> ProcessingParams:
+        return self.entry.params if self.entry else ProcessingParams()
+
+    @property
+    def integrals(self) -> IntegralSet:
+        return self.entry.integrals if self.entry else IntegralSet()
+
+    # ---- documents ----------------------------------------------------------------------
 
     def open_path(self, path: str | Path) -> bool:
-        """Load a file or folder and show it. Returns False (after telling the user) on failure."""
+        """Open a project file, or import data (file, folder or ZIP) into the document.
+
+        Returns False (after telling the user) if nothing could be opened.
+        """
+        path = Path(path)
+        if path.suffix.lower() == PROJECT_SUFFIX:
+            return self.open_project(path)
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            dataset = load(path)
+            entries, errors = self.document.import_path(path)
+        except LoadError as exc:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.warning(self, "Could not open", str(exc))
+            return False
+        for entry in entries:
+            self._process(entry)
+        QApplication.restoreOverrideCursor()
+        if errors:
+            QMessageBox.warning(self, "Some data was skipped", "\n".join(errors))
+
+        self._set_modified(True)
+        self._rebuild_list(select=len(self.document.entries) - len(entries))
+        return True
+
+    def open_project(self, path: str | Path) -> bool:
+        if not self._confirm_discard():
+            return False
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            document = Document.open(path)
+            for entry in document.entries:
+                self._process(entry)
         except LoadError as exc:
             QMessageBox.warning(self, "Could not open", str(exc))
             return False
-
-        self.dataset = dataset
-        self._undo.clear()
-        self._redo.clear()
-        is_fid = dataset.domain == "time"
-        # A FID is transformed and phased right away; a finished spectrum is shown as it is.
-        self.params = default_params(dataset) if is_fid else ProcessingParams()
-        self.panel.set_capabilities(is_fid=is_fid, can_phase=np.iscomplexobj(dataset.data))
-        self.show_fid_action.blockSignals(True)
-        self.show_fid_action.setChecked(False)
-        self.show_fid_action.blockSignals(False)
-        if is_fid:
-            self.auto_phase(keep_view=False, record=False)
-        else:
-            self._reprocess(keep_view=False)
-        self.setWindowTitle(f"{dataset.title} – nmr" if dataset.title else "nmr")
-        self._update_enabled()
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._replace_document(document)
         return True
+
+    def new_document(self) -> None:
+        if self._confirm_discard():
+            self._replace_document(Document())
+
+    def save(self) -> bool:
+        if self.document.path is None:
+            return self.save_as()
+        return self._save_to(self.document.path)
+
+    def save_as(self) -> bool:
+        suggested = str(self.document.path or f"Untitled{PROJECT_SUFFIX}")
+        path, _ = QFileDialog.getSaveFileName(self, "Save Project", suggested, PROJECT_FILTER)
+        if not path:
+            return False
+        if not path.lower().endswith(PROJECT_SUFFIX):
+            path += PROJECT_SUFFIX
+        return self._save_to(Path(path))
+
+    def _save_to(self, path: Path) -> bool:
+        try:
+            self.document.save(path)
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not save", f"{path}\n\n{exc}")
+            return False
+        self._set_modified(False)
+        self._hint.setText(f"Saved {path.name}.")
+        return True
+
+    def select(self, index: int) -> None:
+        """Show another spectrum of the document."""
+        if index == self.current or not 0 <= index < len(self.document.entries):
+            return
+        self.current = index
+        self.spectra_panel.set_current(index)
+        self._show_current(keep_view=False)
+
+    def remove_spectrum(self, index: int) -> None:
+        if not 0 <= index < len(self.document.entries):
+            return
+        self.document.remove(index)
+        self._set_modified(True)
+        self._rebuild_list(select=min(index, len(self.document.entries) - 1))
+
+    def _replace_document(self, document: Document) -> None:
+        self.document.close()
+        self.document = document
+        self._set_modified(False)
+        self._rebuild_list(select=0 if document.entries else -1)
+
+    def _rebuild_list(self, *, select: int) -> None:
+        self.current = select
+        spectra = [_session(entry).spectrum for entry in self.document.entries]
+        self.spectra_panel.set_spectra(spectra, select)
+        self._show_current(keep_view=False)
+
+    def _set_modified(self, modified: bool) -> None:
+        self.modified = modified
+        self._update_title()
+
+    def _update_title(self) -> None:
+        name = self.document.path.name if self.document.path else "Untitled"
+        self.setWindowTitle(f"{name}{'*' if self.modified else ''} – nmr")
+
+    def _confirm_discard(self) -> bool:
+        """Ask what to do with unsaved changes. False means: do not go on."""
+        if not self.modified:
+            return True
+        buttons = QMessageBox.StandardButton
+        answer = QMessageBox.question(
+            self,
+            "Unsaved changes",
+            "Save the changes to this project before closing it?",
+            buttons.Save | buttons.Discard | buttons.Cancel,
+            buttons.Save,
+        )
+        if answer == buttons.Save:
+            return self.save()
+        return answer == buttons.Discard
+
+    # ---- processing ---------------------------------------------------------------------
 
     def set_params(
         self, params: ProcessingParams, *, record: bool = True, keep_view: bool = True
     ) -> None:
         """Apply new processing settings. With `record` the old ones go on the undo stack."""
-        if self.dataset is None or params == self.params:
+        if self.entry is None or params == self.params:
             return
         if record:
             self._record_undo()
-        self.params = params
+        self.entry.params = params
+        self._set_modified(True)
         self._reprocess(keep_view=keep_view)
 
-    def auto_phase(self, *, keep_view: bool = True, record: bool = True) -> None:
-        if self.dataset is None or not np.iscomplexobj(self.dataset.data):
+    def auto_phase(self, *, keep_view: bool = True) -> None:
+        if self.entry is None or not np.iscomplexobj(self.dataset.data):
             return
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            params = auto_phase(self.dataset, self.params)
-        finally:
-            QApplication.restoreOverrideCursor()
+        self.set_params(auto_phase(self.dataset, self.params), keep_view=keep_view)
+
+    def set_integrals(self, integrals: IntegralSet, *, record: bool = True) -> None:
+        if self.entry is None or integrals == self.integrals:
+            return
         if record:
             self._record_undo()
-        self.params = params
-        self._reprocess(keep_view=keep_view)
+        self.entry.integrals = integrals
+        self._set_modified(True)
+        self._refresh_integrals()
+        self._update_enabled()
 
     def undo(self) -> None:
-        if self._undo:
-            self._redo.append(self.params)
-            self.params = self._undo.pop()
-            self._reprocess(keep_view=True)
+        self._step_history(back=True)
 
     def redo(self) -> None:
-        if self._redo:
-            self._undo.append(self.params)
-            self.params = self._redo.pop()
+        self._step_history(back=False)
+
+    def _step_history(self, *, back: bool) -> None:
+        if self.entry is None:
+            return
+        session = _session(self.entry)
+        source, target = (session.undo, session.redo) if back else (session.redo, session.undo)
+        if source:
+            target.append((self.params, self.integrals))
+            self.entry.params, self.entry.integrals = source.pop()
+            self._set_modified(True)
             self._reprocess(keep_view=True)
 
     def _record_undo(self) -> None:
-        self._undo.append(self.params)
-        self._redo.clear()
+        if self.entry is None:
+            return
+        session = _session(self.entry)
+        session.undo.append((self.params, self.integrals))
+        session.redo.clear()
         self._update_enabled()
 
+    def _process(self, entry: Entry) -> Dataset:
+        """Recompute the spectrum of `entry` from its data and settings.
+
+        The Fourier transform is redone only when a transform setting changed. Phase,
+        baseline and referencing act on the spectrum, so dragging the phase does not
+        repeat the transform on every mouse move.
+        """
+        session = _session(entry)
+        transformed = entry.dataset
+        if entry.dataset.domain == "time":
+            params = entry.params
+            key = (params.lb_hz, params.gb_hz, params.zero_fill_factor)
+            if key != session.transform_key:
+                session.transformed = fourier_transform(entry.dataset, params)
+                session.transform_key = key
+            transformed = session.transformed
+        session.spectrum = process(transformed, entry.params)
+        return session.spectrum
+
     def _reprocess(self, *, keep_view: bool) -> None:
-        self.spectrum = process(self.dataset, self.params)
+        self.spectra_panel.update_spectrum(self.current, self._process(self.entry))
         self.panel.set_params(self.params)
         self.plot.set_pivot(self.params.pivot_ppm)
         self._refresh_plot(keep_view=keep_view)
+        self._update_enabled()
+
+    def _show_current(self, *, keep_view: bool) -> None:
+        """Bring every part of the window in line with the current spectrum."""
+        self.show_fid_action.blockSignals(True)
+        self.show_fid_action.setChecked(False)
+        self.show_fid_action.blockSignals(False)
+        self._update_title()
+        if self.entry is None:
+            self.plot.clear_dataset()
+            self.plot.set_pivot(None)
+            self.plot.integrals.set(None, [])
+            self.panel.setEnabled(False)
+            self.integrals_panel.set_integrals([], 0)
+            self._info.setText("No data loaded")
+            self._cursor.clear()
+        else:
+            is_fid = self.dataset.domain == "time"
+            self.panel.set_capabilities(is_fid=is_fid, can_phase=np.iscomplexobj(self.dataset.data))
+            self.panel.set_params(self.params)
+            self.plot.set_pivot(self.params.pivot_ppm)
+            self._refresh_plot(keep_view=keep_view)
         self._update_enabled()
 
     def _refresh_plot(self, *, keep_view: bool) -> None:
@@ -179,6 +407,15 @@ class MainWindow(QMainWindow):
         self.plot.set_dataset(shown, keep_view=keep_view)
         self._info.setText(_describe(shown))
         self._cursor.clear()
+        self._refresh_integrals()
+
+    def _refresh_integrals(self) -> None:
+        results = evaluate(self.spectrum, self.integrals)
+        self.integrals_panel.set_integrals(results, self.integrals.ref_index)
+        if self._showing_spectrum:
+            self.plot.integrals.set(self.spectrum, results)
+        else:
+            self.plot.integrals.set(None, [])
 
     @property
     def _showing_spectrum(self) -> bool:
@@ -232,8 +469,15 @@ class MainWindow(QMainWindow):
             10000.0,
             4,
         )
-        if accepted:
-            self.set_params(shift_reference(self.params, value - peak))
+        if accepted and value != peak:
+            # The integration regions move along with the axis, as one undo step.
+            self._record_undo()
+            self.entry.integrals = self.integrals.shifted(value - peak)
+            self.set_params(shift_reference(self.params, value - peak), record=False)
+
+    def _add_integral(self, a_ppm: float, b_ppm: float) -> None:
+        if self._showing_spectrum:
+            self.set_integrals(self.integrals.add(a_ppm, b_ppm))
 
     def _nearest_peak(self, ppm: float) -> float:
         """Top of the signal the user clicked on: the maximum within 1 % of the view."""
@@ -282,15 +526,29 @@ class MainWindow(QMainWindow):
 
     def _build_actions(self) -> None:
         std = QKeySequence.StandardKey
-        self.open_file_action = self._action("&Open File…", self._choose_file, std.Open)
-        self.open_folder_action = self._action(
-            "Open &Bruker Folder…", self._choose_folder, "Ctrl+Shift+O"
+        self.new_action = self._action("&New", self.new_document, std.New)
+        self.open_file_action = self._action(
+            "&Open…", self._choose_file, std.Open, tip="Open a project or import data"
         )
+        self.open_folder_action = self._action(
+            "Import &Folder…", self._choose_folder, "Ctrl+Shift+O", tip="Import a data folder"
+        )
+        self.save_action = self._action("&Save", self.save, std.Save)
+        self.save_as_action = self._action("Save &As…", self.save_as, "Ctrl+Shift+S")
         self.quit_action = self._action("&Quit", self.close, "Ctrl+Q")
 
         self.undo_action = self._action("&Undo", self.undo, std.Undo)
         self.redo_action = self._action("&Redo", self.redo, ["Ctrl+Y", "Ctrl+Shift+Z"])
         self.copy_action = self._action("&Copy as Image", self.copy_image, std.Copy)
+        self.remove_action = self._action(
+            "&Remove Spectrum", lambda: self.remove_spectrum(self.current)
+        )
+        self.previous_action = self._action(
+            "&Previous Spectrum", lambda: self.select(self.current - 1), "PgUp"
+        )
+        self.next_action = self._action(
+            "&Next Spectrum", lambda: self.select(self.current + 1), "PgDown"
+        )
 
         tools = [
             (Tool.SELECT, "&Select", "Esc", "Select tool: drag to move the spectrum"),
@@ -299,6 +557,7 @@ class MainWindow(QMainWindow):
             (Tool.CROSSHAIR, "&Crosshair", "C", "Crosshair cursor for measuring distances"),
             (Tool.PHASE, "&Manual Phase", "Shift+P", "Manual phase correction"),
             (Tool.REFERENCE, "&Reference", "L", "Set the chemical shift reference"),
+            (Tool.INTEGRATE, "&Integrate", "I", "Manual integration: drag across a signal"),
         ]
         group = QActionGroup(self)
         self.tool_actions: dict[Tool, QAction] = {}
@@ -329,13 +588,18 @@ class MainWindow(QMainWindow):
         self.auto_phase_action = self._action(
             "&Automatic Phase Correction", lambda: self.auto_phase(), "Ctrl+Shift+P"
         )
+        self.clear_integrals_action = self._action(
+            "&Delete All Integrals", lambda: self.set_integrals(IntegralSet())
+        )
         self.shortcuts_action = self._action("&Keyboard Shortcuts", self._show_shortcuts, "F1")
         self.about_action = self._action("&About nmr", self._show_about)
 
     def _build_menus(self) -> None:
         bar = self.menuBar()
         file_menu = bar.addMenu("&File")
-        file_menu.addActions([self.open_file_action, self.open_folder_action])
+        file_menu.addActions([self.new_action, self.open_file_action, self.open_folder_action])
+        file_menu.addSeparator()
+        file_menu.addActions([self.save_action, self.save_as_action])
         file_menu.addSeparator()
         file_menu.addAction(self.quit_action)
 
@@ -343,20 +607,31 @@ class MainWindow(QMainWindow):
         edit_menu.addActions([self.undo_action, self.redo_action])
         edit_menu.addSeparator()
         edit_menu.addAction(self.copy_action)
+        edit_menu.addAction(self.remove_action)
 
         view_menu = bar.addMenu("&View")
         view_menu.addActions([self.full_action, self.fit_action, self.zoom_out_action])
         view_menu.addActions([self.bigger_action, self.smaller_action])
         view_menu.addSeparator()
+        view_menu.addActions([self.previous_action, self.next_action])
+        view_menu.addSeparator()
         view_menu.addAction(self.show_fid_action)
-        panel_action = self.dock.toggleViewAction()
-        panel_action.setText("&Processing Panel")
-        view_menu.addAction(panel_action)
+        for dock, text in (
+            (self.spectra_dock, "&Spectra Panel"),
+            (self.dock, "&Processing Panel"),
+            (self.integrals_dock, "&Integrals Panel"),
+        ):
+            dock.toggleViewAction().setText(text)
+            view_menu.addAction(dock.toggleViewAction())
 
         tools_menu = bar.addMenu("&Tools")
         tools_menu.addActions(list(self.tool_actions.values())[:4])
         tools_menu.addSeparator()
         tools_menu.addActions(list(self.tool_actions.values())[4:])
+
+        analysis_menu = bar.addMenu("&Analysis")
+        analysis_menu.addAction(self.tool_actions[Tool.INTEGRATE])
+        analysis_menu.addAction(self.clear_integrals_action)
 
         processing_menu = bar.addMenu("&Processing")
         processing_menu.addAction(self.auto_phase_action)
@@ -378,6 +653,7 @@ class MainWindow(QMainWindow):
             toolbar.addAction(action)
 
         add(self.open_file_action, "Open")
+        add(self.save_action, "Save")
         toolbar.addSeparator()
         for tool, label in (
             (Tool.SELECT, "Select"),
@@ -394,37 +670,63 @@ class MainWindow(QMainWindow):
         add(self.tool_actions[Tool.PHASE], "Phase")
         add(self.tool_actions[Tool.REFERENCE], "Reference")
         toolbar.addSeparator()
+        add(self.tool_actions[Tool.INTEGRATE], "Integrate")
+        toolbar.addSeparator()
         add(self.show_fid_action, "FID")
 
     def _update_enabled(self) -> None:
-        loaded = self.dataset is not None
+        loaded = self.entry is not None
         is_fid = loaded and self.dataset.domain == "time"
         complex_data = loaded and np.iscomplexobj(self.dataset.data)
         for action in (
             self.copy_action,
+            self.remove_action,
             self.zoom_out_action,
             self.full_action,
             self.fit_action,
             self.bigger_action,
             self.smaller_action,
             self.tool_actions[Tool.REFERENCE],
+            self.tool_actions[Tool.INTEGRATE],
         ):
             action.setEnabled(loaded)
+        count = len(self.document.entries)
+        self.save_action.setEnabled(count > 0)
+        self.save_as_action.setEnabled(count > 0)
+        self.previous_action.setEnabled(self.current > 0)
+        self.next_action.setEnabled(0 <= self.current < count - 1)
+        self.clear_integrals_action.setEnabled(bool(self.integrals.ranges))
         self.show_fid_action.setEnabled(is_fid)
         self.auto_phase_action.setEnabled(complex_data)
         self.tool_actions[Tool.PHASE].setEnabled(complex_data)
-        self.undo_action.setEnabled(bool(self._undo))
-        self.redo_action.setEnabled(bool(self._redo))
+        session = _session(self.entry) if loaded else _Session()
+        self.undo_action.setEnabled(bool(session.undo))
+        self.redo_action.setEnabled(bool(session.redo))
+
+    def _add_dock(
+        self, title: str, widget, area=Qt.DockWidgetArea.RightDockWidgetArea
+    ) -> QDockWidget:
+        dock = QDockWidget(title, self)
+        dock.setWidget(widget)
+        dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
+        )
+        dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.addDockWidget(area, dock)
+        return dock
 
     # ---- dialogs and events -------------------------------------------------------------
 
     def _choose_file(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Open File", "", FILE_FILTER)
-        if path:
+        paths, _ = QFileDialog.getOpenFileNames(self, "Open", "", OPEN_FILTER)
+        for path in paths:
             self.open_path(path)
 
     def _choose_folder(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Open Bruker Folder")
+        path = QFileDialog.getExistingDirectory(self, "Import Folder")
         if path:
             self.open_path(path)
 
@@ -433,9 +735,16 @@ class MainWindow(QMainWindow):
             event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent) -> None:
-        urls = event.mimeData().urls()
-        if urls and urls[0].isLocalFile():
-            self.open_path(urls[0].toLocalFile())
+        for url in event.mimeData().urls():
+            if url.isLocalFile():
+                self.open_path(url.toLocalFile())
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self._confirm_discard():
+            self.document.close()
+            event.accept()
+        else:
+            event.ignore()
 
     def _show_shortcuts(self) -> None:
         ShortcutsDialog(self).exec()

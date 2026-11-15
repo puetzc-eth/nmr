@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QApplication
 ACCENT = "#2563eb"
 SPECTRUM = "#1e3a8a"
 PIVOT = "#ea580c"
+INTEGRAL = "#059669"
 CROSSHAIR = "#64748b"
 AXIS = "#475569"
 TEXT = "#0f172a"
@@ -43,6 +44,8 @@ QGroupBox QLabel, QGroupBox QCheckBox {{ font-weight: normal; }}
 
 QDoubleSpinBox, QSpinBox, QComboBox {{ background: white; border: 1px solid #cbd5e1;
     border-radius: 6px; padding: 4px 6px; min-height: 20px; font-weight: normal; }}
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button,
+QSpinBox::up-button, QSpinBox::down-button {{ width: 0px; border: none; }}
 QDoubleSpinBox:focus, QSpinBox:focus, QComboBox:focus {{ border-color: {ACCENT}; }}
 QDoubleSpinBox:disabled, QSpinBox:disabled, QComboBox:disabled {{ background: #f1f5f9;
     color: #94a3b8; }}
@@ -53,6 +56,12 @@ QPushButton:pressed {{ background: {BORDER}; }}
 QPushButton:default {{ background: {ACCENT}; border-color: {ACCENT}; color: white; }}
 QPushButton:disabled {{ color: #94a3b8; }}
 
+QScrollArea, QScrollArea > QWidget > QWidget {{ background: {SURFACE}; }}
+QListWidget {{ background: {SURFACE}; border: none; outline: none; }}
+QListWidget::item {{ background: white; border: 1px solid {BORDER}; border-radius: 9px;
+                     padding: 6px; color: {TEXT}; }}
+QListWidget::item:hover {{ border-color: #cbd5e1; }}
+QListWidget::item:selected {{ border: 2px solid {ACCENT}; background: #eff6ff; color: {TEXT}; }}
 QStatusBar {{ background: white; border-top: 1px solid {BORDER}; color: {MUTED}; }}
 QStatusBar::item {{ border: none; }}
 QStatusBar QLabel {{ color: {MUTED}; padding: 2px 8px; }}

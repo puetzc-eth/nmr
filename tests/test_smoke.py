@@ -300,3 +300,91 @@ def test_shortcuts_dialog_lists_every_bound_key(window):
             if key in ("=", "-", "+"):
                 continue
             assert key in listed, f"{key} ({action.text()}) is missing from the shortcut list"
+
+
+def test_integrate_by_dragging_regions(aspirin):
+    from nmr.gui.spectrum_view import Tool
+
+    window = aspirin
+    table = window.integrals_panel.table
+    assert [s.toString() for s in window.tool_actions[Tool.INTEGRATE].shortcuts()] == ["I"]
+    assert not window.clear_integrals_action.isEnabled()
+
+    # Aspirin: acetyl CH3 (3 H) near 2.3 ppm, one aromatic H between 7.0 and 7.2 ppm.
+    window.plot.region_selected.emit(2.2, 2.5)
+    window.plot.region_selected.emit(7.2, 7.0)
+
+    assert window.integrals.ranges == ((7.2, 7.0), (2.5, 2.2))
+    assert table.rowCount() == 2
+    assert table.item(1, 2).text() == "1.00"  # drawn first, so it is the reference
+    assert len(window.plot.integrals) == 2
+    assert window.clear_integrals_action.isEnabled()
+
+    # Typing 3 for the methyl group scales the aromatic proton to about 1.
+    table.item(1, 2).setText("3")
+    assert table.item(1, 2).text() == "3.00"
+    assert float(table.item(0, 2).text()) == pytest.approx(1.0, abs=0.1)
+
+    # Nonsense input is rejected and the old value comes back.
+    table.item(0, 2).setText("abc")
+    assert float(table.item(0, 2).text()) == pytest.approx(1.0, abs=0.1)
+
+    table.selectRow(0)
+    window.integrals_panel.delete_button.click()
+    assert window.integrals.ranges == ((2.5, 2.2),)
+    assert table.item(0, 2).text() == "3.00"
+
+    window.undo_action.trigger()
+    assert len(window.integrals.ranges) == 2
+    window.clear_integrals_action.trigger()
+    assert table.rowCount() == 0
+    assert len(window.plot.integrals) == 0
+
+
+def test_integrals_follow_processing_and_referencing(aspirin, monkeypatch):
+    from PySide6.QtWidgets import QInputDialog
+
+    window = aspirin
+    window.plot.region_selected.emit(2.2, 2.5)
+    window.plot.region_selected.emit(8.3, 7.0)
+    before = float(window.integrals_panel.table.item(0, 2).text())
+
+    # Integrals are recomputed when the processing changes ...
+    window.panel.ph0.setValue(window.panel.ph0.value() + 60.0)
+    assert float(window.integrals_panel.table.item(0, 2).text()) != before
+    window.undo_action.trigger()
+
+    # ... are hidden while the FID is shown ...
+    window.show_fid_action.trigger()
+    assert len(window.plot.integrals) == 0
+    window.show_fid_action.trigger()
+    assert len(window.plot.integrals) == 2
+
+    # ... and move with the axis when the spectrum is re-referenced.
+    x, y = curve(window)
+    peak = x[np.argmax(y)]
+    monkeypatch.setattr(QInputDialog, "getDouble", lambda *args: (peak + 1.0, True))
+    window.plot.reference_picked.emit(peak)
+    assert np.allclose(window.integrals.ranges, ((9.3, 8.0), (3.5, 3.2)))
+    assert float(window.integrals_panel.table.item(0, 2).text()) == pytest.approx(before)
+
+    window.undo_action.trigger()
+    assert window.integrals.ranges == ((8.3, 7.0), (2.5, 2.2))
+
+
+def test_phase_changes_reuse_the_fourier_transform(aspirin):
+    window = aspirin
+    session = window.entry.runtime["session"]
+    transformed = session.transformed
+
+    window.panel.ph0.setValue(12.0)
+    window.panel.baseline.setChecked(True)
+    assert session.transformed is transformed
+
+    window.panel.lb.setValue(1.0)
+    assert session.transformed is not transformed
+
+
+def test_spectrum_pen_stays_one_pixel_wide(window):
+    """Wider pens make every repaint many times slower."""
+    assert window.plot.curve.opts["pen"].widthF() <= 1.0
