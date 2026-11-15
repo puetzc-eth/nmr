@@ -40,8 +40,17 @@ ruff check .
 
 ## Project files
 
-Data is imported by opening or dropping the original instrument files (Bruker folders,
-JCAMP-DX files, ZIP archives of either). The originals are only read, never changed.
+Data is imported by opening or dropping the original instrument files. The originals are
+only read, never changed.
+
+| Format | Import | Export |
+|---|---|---|
+| Bruker TopSpin folder (FID and processed spectrum) | yes | |
+| JEOL Delta `.jdf` (FID) | yes | |
+| Varian/Agilent VnmrJ folder (`fid` + `procpar`) | yes, not yet verified on instrument data | |
+| JCAMP-DX (`.dx`, `.jdx`) | yes | yes |
+| ZIP archive of any of the above | yes | |
+| CSV (shift, intensity) | | yes |
 
 A project is saved as a `.nmrx` file, which is a plain ZIP archive:
 

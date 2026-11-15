@@ -388,3 +388,51 @@ def test_phase_changes_reuse_the_fourier_transform(aspirin):
 def test_spectrum_pen_stays_one_pixel_wide(window):
     """Wider pens make every repaint many times slower."""
     assert window.plot.curve.opts["pen"].widthF() <= 1.0
+
+
+def test_ribbon_replaces_menu_and_toolbar(window):
+    from PySide6.QtWidgets import QToolBar
+
+    ribbon = window.ribbon
+    assert window.menuWidget() is ribbon
+    assert window.findChildren(QToolBar) == []
+    assert ribbon.page_titles() == ["File", "Home", "View", "Processing", "Analysis", "Help"]
+    assert ribbon.tabs.tabText(ribbon.tabs.currentIndex()) == "&Home"
+
+    buttons = [ribbon.pages.widget(i).buttons for i in range(ribbon.pages.count())]
+    assert all(page for page in buttons)
+    for button in (b for page in buttons for b in page):
+        assert not button.icon().isNull(), button.text()
+        assert button.text() and button.toolTip()
+
+    # Every command of the window can be reached from the ribbon.
+    reachable = {b.defaultAction() for page in buttons for b in page}
+    assert set(window.actions()) <= reachable
+
+
+def test_ribbon_buttons_follow_their_actions(aspirin):
+    from nmr.gui.spectrum_view import Tool
+
+    window = aspirin
+    home = window.ribbon.pages.widget(1).buttons
+    by_text = {button.text(): button for button in home}
+
+    assert not by_text["Undo"].isEnabled()
+    window.panel.lb.setValue(1.0)
+    assert by_text["Undo"].isEnabled()
+
+    by_text["Zoom"].click()
+    assert window.plot.tool is Tool.ZOOM and by_text["Zoom"].isChecked()
+    assert not by_text["Select"].isChecked()
+
+    window.ribbon.show_page("Analysis")
+    assert window.ribbon.pages.currentIndex() == 4
+
+
+def test_every_icon_renders(qapp):
+    from nmr.gui import icons
+
+    for name in icons.ICONS:
+        image = icons.pixmap(name, 40).toImage()
+        painted = sum(image.pixelColor(x, y).alpha() > 0 for x in range(40) for y in range(40))
+        assert painted > 20, f"icon {name!r} is empty"

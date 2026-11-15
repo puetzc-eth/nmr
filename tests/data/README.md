@@ -28,3 +28,14 @@ Source: <https://github.com/cheminfo/jcamp-data-test> (MIT, © cheminfo), `data/
 | `aspirin-1h.dx` | ¹H spectrum (real + imaginary), Bruker export |
 | `jeol-1h.dx` | ¹H spectrum, JEOL export |
 | `varian-1h.jdx` | ¹H spectrum, Varian/Agilent export |
+| `rutin-1h.jdx` | ¹H spectrum of rutin, JEOL export of the measurement in `jeol/` |
+
+## jeol/
+
+Source: <https://github.com/cheminfo/jeol-data-test> (MIT, © cheminfo), `data/`.
+
+| File | Content |
+|---|---|
+| `rutin-1h.jdf` | ¹H FID of rutin in DMSO-d6, 400 MHz, JEOL Delta format (32k points) |
+
+There is no real Varian/Agilent raw data here yet; the tests generate a VnmrJ folder.

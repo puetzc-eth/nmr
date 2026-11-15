@@ -188,3 +188,23 @@ def test_broken_project_file_leaves_the_document_alone(two_spectra, tmp_path, mo
     assert not two_spectra.open_path(broken)
     assert "not a readable project file" in shown[0]
     assert len(two_spectra.document.entries) == 2
+
+
+def test_import_jeol_and_export_jcamp(window, tmp_path, monkeypatch):
+    from nmr.core.io import load
+
+    assert not window.export_actions[0].isEnabled()
+    assert window.open_path(DATA / "jeol" / "rutin-1h.jdf")
+    assert window.spectra_panel.list.item(0).text() == "¹H  Rutin_RUTI01_3080u200u"
+
+    target = tmp_path / "rutin"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), ""))
+    jcamp_action, csv_action = window.export_actions
+    jcamp_action.trigger()
+    csv_action.trigger()
+
+    exported = load(tmp_path / "rutin.jdx")
+    np.testing.assert_allclose(exported.ppm_axis, window.spectrum.ppm_axis, atol=1e-9)
+    assert (tmp_path / "rutin.csv").read_text().startswith("ppm,intensity")
+    # Exporting does not count as saving the project.
+    assert window.modified

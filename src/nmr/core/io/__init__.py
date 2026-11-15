@@ -4,29 +4,42 @@ import re
 from pathlib import Path
 
 from nmr.core.dataset import Dataset
-from nmr.core.io import bruker, jcamp
+from nmr.core.io import bruker, jcamp, jeol, varian
 from nmr.core.io.errors import LoadError
 
 __all__ = ["LoadError", "find_datasets", "load", "origin_of"]
 
 JCAMP_SUFFIXES = {".dx", ".jdx", ".jcamp"}
+JEOL_SUFFIXES = {".jdf"}
+FILE_SUFFIXES = JCAMP_SUFFIXES | JEOL_SUFFIXES
 BRUKER_FID_FILES = {"fid", "acqus", "acqu"}
 BRUKER_PROCESSED_FILES = {"1r", "1i", "procs", "proc"}
+VARIAN_FILES = {"fid", "procpar"}
 IGNORED_FOLDERS = {"__MACOSX"}
 
 
 def load(path: str | Path) -> Dataset:
-    """Load a 1D data set from a Bruker folder (or a file inside one) or a JCAMP-DX file."""
+    """Load a 1D data set.
+
+    Accepts a Bruker or Varian/Agilent experiment folder (or a file inside one), a
+    JCAMP-DX file or a JEOL Delta file.
+    """
     path = Path(path)
     if not path.exists():
         raise LoadError(f"Path not found: {path}")
 
     if path.is_dir():
+        if _is_varian(path):
+            return varian.load(path)
         return _load_bruker_dir(path)
 
     name = path.name.lower()
     if path.suffix.lower() in JCAMP_SUFFIXES:
         return jcamp.load(path)
+    if path.suffix.lower() in JEOL_SUFFIXES:
+        return jeol.load(path)
+    if name in VARIAN_FILES and _is_varian(path.parent):
+        return varian.load(path.parent)
     if name in BRUKER_FID_FILES:
         return bruker.load_fid(path.parent)
     if name in BRUKER_PROCESSED_FILES:
@@ -62,7 +75,7 @@ def origin_of(path: str | Path) -> tuple[Path, str]:
     path = Path(path)
     if path.is_file():
         name = path.name.lower()
-        if name in BRUKER_FID_FILES:
+        if name in BRUKER_FID_FILES | VARIAN_FILES:
             return path.parent, ""
         if name in BRUKER_PROCESSED_FILES:
             path = path.parent
@@ -76,7 +89,7 @@ def origin_of(path: str | Path) -> tuple[Path, str]:
 def _collect(folder: Path, found: list[Path]) -> None:
     for child in sorted(folder.iterdir(), key=_natural_key):
         if child.is_file():
-            if child.suffix.lower() in JCAMP_SUFFIXES:
+            if child.suffix.lower() in FILE_SUFFIXES:
                 found.append(child)
         elif child.name in IGNORED_FOLDERS:
             continue
@@ -85,6 +98,10 @@ def _collect(folder: Path, found: list[Path]) -> None:
         elif not (child / "ser").is_file():
             # Not an experiment itself (and not a 2D one): look inside.
             _collect(child, found)
+
+
+def _is_varian(folder: Path) -> bool:
+    return (folder / "procpar").is_file() and (folder / "fid").is_file()
 
 
 def _is_bruker_dataset(folder: Path) -> bool:

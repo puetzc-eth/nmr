@@ -23,7 +23,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QScrollArea,
-    QToolBar,
 )
 
 from nmr import __version__
@@ -31,6 +30,7 @@ from nmr.core.dataset import Dataset
 from nmr.core.document import PROJECT_SUFFIX, Document, Entry
 from nmr.core.integration import IntegralSet, evaluate
 from nmr.core.io import LoadError
+from nmr.core.io.export import save_csv, save_jcamp
 from nmr.core.processing import (
     ProcessingParams,
     auto_phase,
@@ -38,8 +38,10 @@ from nmr.core.processing import (
     process,
     shift_reference,
 )
+from nmr.gui import icons
 from nmr.gui.integrals_panel import IntegralsPanel
 from nmr.gui.processing_panel import ProcessingPanel
+from nmr.gui.ribbon import Ribbon
 from nmr.gui.shortcuts_dialog import ShortcutsDialog
 from nmr.gui.spectra_panel import SpectraPanel
 from nmr.gui.spectrum_view import WHEEL_STEP, SpectrumView, Tool, format_nucleus
@@ -47,9 +49,14 @@ from nmr.gui.spectrum_view import WHEEL_STEP, SpectrumView, Tool, format_nucleus
 SIDEBAR_WIDTH = 300
 PROJECT_FILTER = f"nmr project (*{PROJECT_SUFFIX})"
 OPEN_FILTER = (
-    f"All supported (*{PROJECT_SUFFIX} *.dx *.jdx *.jcamp *.zip fid 1r);;"
-    f"{PROJECT_FILTER};;JCAMP-DX (*.dx *.jdx *.jcamp);;ZIP archive (*.zip);;All files (*)"
+    f"All supported (*{PROJECT_SUFFIX} *.dx *.jdx *.jcamp *.jdf *.zip fid 1r procpar);;"
+    f"{PROJECT_FILTER};;JCAMP-DX (*.dx *.jdx *.jcamp);;JEOL Delta (*.jdf);;"
+    "Bruker or Varian/Agilent FID (fid 1r procpar);;ZIP archive (*.zip);;All files (*)"
 )
+EXPORTERS = {
+    "JCAMP-DX": ("JCAMP-DX (*.jdx)", ".jdx", save_jcamp),
+    "CSV": ("Comma-separated values (*.csv)", ".csv", save_csv),
+}
 
 TOOL_HINTS = {
     Tool.SELECT: "",
@@ -147,8 +154,7 @@ class MainWindow(QMainWindow):
         self.statusBar().setSizeGripEnabled(False)
 
         self._build_actions()
-        self._build_menus()
-        self._build_toolbar()
+        self._build_ribbon()
         self._show_current(keep_view=False)
 
     # ---- the current spectrum -----------------------------------------------------------
@@ -247,6 +253,24 @@ class MainWindow(QMainWindow):
             return False
         self._set_modified(False)
         self._hint.setText(f"Saved {path.name}.")
+        return True
+
+    def export_spectrum(self, kind: str) -> bool:
+        """Write the current, processed spectrum in an exchange format."""
+        if self.spectrum is None:
+            return False
+        file_filter, suffix, writer = EXPORTERS[kind]
+        path, _ = QFileDialog.getSaveFileName(self, f"Export as {kind}", "", file_filter)
+        if not path:
+            return False
+        if not path.lower().endswith(suffix):
+            path += suffix
+        try:
+            writer(self.spectrum, path)
+        except OSError as exc:
+            QMessageBox.warning(self, "Could not export", f"{path}\n\n{exc}")
+            return False
+        self._hint.setText(f"Exported {Path(path).name}.")
         return True
 
     def select(self, index: int) -> None:
@@ -535,6 +559,10 @@ class MainWindow(QMainWindow):
         )
         self.save_action = self._action("&Save", self.save, std.Save)
         self.save_as_action = self._action("Save &As…", self.save_as, "Ctrl+Shift+S")
+        self.export_actions = [
+            self._action(f"{kind}…", lambda _=False, k=kind: self.export_spectrum(k))
+            for kind in EXPORTERS
+        ]
         self.quit_action = self._action("&Quit", self.close, "Ctrl+Q")
 
         self.undo_action = self._action("&Undo", self.undo, std.Undo)
@@ -594,85 +622,83 @@ class MainWindow(QMainWindow):
         self.shortcuts_action = self._action("&Keyboard Shortcuts", self._show_shortcuts, "F1")
         self.about_action = self._action("&About nmr", self._show_about)
 
-    def _build_menus(self) -> None:
-        bar = self.menuBar()
-        file_menu = bar.addMenu("&File")
-        file_menu.addActions([self.new_action, self.open_file_action, self.open_folder_action])
-        file_menu.addSeparator()
-        file_menu.addActions([self.save_action, self.save_as_action])
-        file_menu.addSeparator()
-        file_menu.addAction(self.quit_action)
+    def _build_ribbon(self) -> None:
+        """Tabs with icon buttons, in place of a menu bar and tool bar."""
 
-        edit_menu = bar.addMenu("&Edit")
-        edit_menu.addActions([self.undo_action, self.redo_action])
-        edit_menu.addSeparator()
-        edit_menu.addAction(self.copy_action)
-        edit_menu.addAction(self.remove_action)
-
-        view_menu = bar.addMenu("&View")
-        view_menu.addActions([self.full_action, self.fit_action, self.zoom_out_action])
-        view_menu.addActions([self.bigger_action, self.smaller_action])
-        view_menu.addSeparator()
-        view_menu.addActions([self.previous_action, self.next_action])
-        view_menu.addSeparator()
-        view_menu.addAction(self.show_fid_action)
-        for dock, text in (
-            (self.spectra_dock, "&Spectra Panel"),
-            (self.dock, "&Processing Panel"),
-            (self.integrals_dock, "&Integrals Panel"),
-        ):
-            dock.toggleViewAction().setText(text)
-            view_menu.addAction(dock.toggleViewAction())
-
-        tools_menu = bar.addMenu("&Tools")
-        tools_menu.addActions(list(self.tool_actions.values())[:4])
-        tools_menu.addSeparator()
-        tools_menu.addActions(list(self.tool_actions.values())[4:])
-
-        analysis_menu = bar.addMenu("&Analysis")
-        analysis_menu.addAction(self.tool_actions[Tool.INTEGRATE])
-        analysis_menu.addAction(self.clear_integrals_action)
-
-        processing_menu = bar.addMenu("&Processing")
-        processing_menu.addAction(self.auto_phase_action)
-        processing_menu.addAction(self.tool_actions[Tool.PHASE])
-        processing_menu.addAction(self.tool_actions[Tool.REFERENCE])
-
-        help_menu = bar.addMenu("&Help")
-        help_menu.addActions([self.shortcuts_action, self.about_action])
-
-    def _build_toolbar(self) -> None:
-        toolbar = QToolBar("Tools", self)
-        toolbar.setMovable(False)
-        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        toolbar.toggleViewAction().setVisible(False)
-        self.addToolBar(toolbar)
-
-        def add(action: QAction, label: str) -> None:
+        def use(action: QAction, icon: str, label: str) -> QAction:
+            action.setIcon(icons.icon(icon))
             action.setIconText(label)
-            toolbar.addAction(action)
+            return action
 
-        add(self.open_file_action, "Open")
-        add(self.save_action, "Save")
-        toolbar.addSeparator()
-        for tool, label in (
-            (Tool.SELECT, "Select"),
-            (Tool.ZOOM, "Zoom"),
-            (Tool.PAN, "Pan"),
-            (Tool.CROSSHAIR, "Crosshair"),
-        ):
-            add(self.tool_actions[tool], label)
-        toolbar.addSeparator()
-        add(self.full_action, "Full")
-        add(self.fit_action, "Fit height")
-        toolbar.addSeparator()
-        add(self.auto_phase_action, "Auto phase")
-        add(self.tool_actions[Tool.PHASE], "Phase")
-        add(self.tool_actions[Tool.REFERENCE], "Reference")
-        toolbar.addSeparator()
-        add(self.tool_actions[Tool.INTEGRATE], "Integrate")
-        toolbar.addSeparator()
-        add(self.show_fid_action, "FID")
+        tool = self.tool_actions
+        new = use(self.new_action, "new", "New")
+        open_ = use(self.open_file_action, "open", "Open")
+        import_ = use(self.open_folder_action, "import", "Import folder")
+        save = use(self.save_action, "save", "Save")
+        save_as = use(self.save_as_action, "save-as", "Save as")
+        exports = [
+            use(action, "export", f"Export {kind}")
+            for action, kind in zip(self.export_actions, EXPORTERS, strict=True)
+        ]
+        quit_ = use(self.quit_action, "quit", "Quit")
+        undo = use(self.undo_action, "undo", "Undo")
+        redo = use(self.redo_action, "redo", "Redo")
+        copy = use(self.copy_action, "copy", "Copy image")
+        remove = use(self.remove_action, "remove", "Remove")
+        select = use(tool[Tool.SELECT], "select", "Select")
+        zoom = use(tool[Tool.ZOOM], "zoom", "Zoom")
+        zoom_out = use(self.zoom_out_action, "zoom-out", "Zoom out")
+        pan = use(tool[Tool.PAN], "pan", "Pan")
+        crosshair = use(tool[Tool.CROSSHAIR], "crosshair", "Crosshair")
+        full = use(self.full_action, "full", "Full")
+        fit = use(self.fit_action, "fit-height", "Fit height")
+        bigger = use(self.bigger_action, "intensity-up", "Increase")
+        smaller = use(self.smaller_action, "intensity-down", "Decrease")
+        previous = use(self.previous_action, "previous", "Previous")
+        next_ = use(self.next_action, "next", "Next")
+        fid = use(self.show_fid_action, "fid", "FID")
+        auto_phase_ = use(self.auto_phase_action, "auto-phase", "Auto phase")
+        phase = use(tool[Tool.PHASE], "phase", "Manual phase")
+        reference = use(tool[Tool.REFERENCE], "reference", "Reference")
+        integrate = use(tool[Tool.INTEGRATE], "integrate", "Integrate")
+        clear = use(self.clear_integrals_action, "clear-integrals", "Delete all")
+        shortcuts = use(self.shortcuts_action, "shortcuts", "Shortcuts")
+        about = use(self.about_action, "about", "About")
+        panels = [
+            use(self.spectra_dock.toggleViewAction(), "panel-left", "Spectra"),
+            use(self.dock.toggleViewAction(), "panel-right", "Processing"),
+            use(self.integrals_dock.toggleViewAction(), "panel-table", "Integrals"),
+        ]
+        for action, name in zip(panels, ("spectra", "processing", "integrals"), strict=True):
+            action.setToolTip(f"Show or hide the {name} panel")
+
+        pages = {
+            "&File": [[new, open_, import_], [save, save_as], exports, [quit_]],
+            "&Home": [
+                [open_, save],
+                [undo, redo, copy],
+                [select, zoom, pan, crosshair],
+                [full, fit],
+                [auto_phase_, reference, integrate],
+            ],
+            "&View": [
+                [select, zoom, zoom_out, pan, crosshair],
+                [full, fit, bigger, smaller],
+                [previous, next_, remove],
+                [fid],
+                panels,
+            ],
+            "&Processing": [[auto_phase_, phase], [reference], [fid]],
+            "&Analysis": [[integrate, clear]],
+            "H&elp": [[shortcuts, about]],
+        }
+        self.ribbon = Ribbon()
+        for title, groups in pages.items():
+            page = self.ribbon.add_page(title)
+            for group in groups:
+                page.add_group(group)
+        self.ribbon.show_page("Home")
+        self.setMenuWidget(self.ribbon)
 
     def _update_enabled(self) -> None:
         loaded = self.entry is not None
@@ -688,6 +714,7 @@ class MainWindow(QMainWindow):
             self.smaller_action,
             self.tool_actions[Tool.REFERENCE],
             self.tool_actions[Tool.INTEGRATE],
+            *self.export_actions,
         ):
             action.setEnabled(loaded)
         count = len(self.document.entries)
