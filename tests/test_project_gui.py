@@ -208,3 +208,94 @@ def test_import_jeol_and_export_jcamp(window, tmp_path, monkeypatch):
     assert (tmp_path / "rutin.csv").read_text().startswith("ppm,intensity")
     # Exporting does not count as saving the project.
     assert window.modified
+
+
+@pytest.fixture
+def ibuprofen(window):
+    assert window.open_path(DATA / "bruker" / "ibuprofen-1h-processed.zip")
+    return window
+
+
+def test_multiplets_by_dragging_regions(ibuprofen):
+    from PySide6.QtWidgets import QApplication
+
+    from nmr.gui.spectrum_view import Tool
+
+    window = ibuprofen
+    table = window.multiplets_panel.table
+    assert [s.toString() for s in window.tool_actions[Tool.MULTIPLET].shortcuts()] == ["J"]
+    assert not window.copy_report_action.isEnabled()
+
+    window.plot.multiplet_selected.emit(0.84, 0.96)
+    window.plot.multiplet_selected.emit(3.76, 3.68)
+
+    assert table.rowCount() == 2
+    # Ibuprofen: the CH next to the acid is a quartet, the two methyl groups a doublet.
+    assert [table.item(0, c).text() for c in (1, 3)] == ["q", "1"]
+    assert float(table.item(0, 0).text()) == pytest.approx(3.73, abs=0.01)
+    assert float(table.item(0, 2).text()) == pytest.approx(7.15, abs=0.1)
+    assert [table.item(1, c).text() for c in range(1, 4)] == ["d", "6.6", "6"]
+    assert len(window.plot.multiplets) == 2
+    report = window.multiplets_panel.report.toPlainText()
+    assert report.startswith("¹H NMR (600 MHz, CDCl₃) δ 3.73 (q, J = 7.")
+    assert report.endswith(" Hz, 1H), 0.92 (d, J = 6.6 Hz, 6H).")
+
+    window.copy_report_action.trigger()
+    clipboard = QApplication.clipboard().mimeData()
+    assert clipboard.text() == report
+    assert "(q, <i>J</i> = 7." in clipboard.html()
+
+
+def test_multiplet_corrections_and_undo(ibuprofen):
+    window = ibuprofen
+    table = window.multiplets_panel.table
+    window.plot.multiplet_selected.emit(0.84, 0.96)
+    window.plot.multiplet_selected.emit(3.76, 3.68)
+
+    table.item(0, 1).setText("br s")
+    table.item(1, 3).setText("3")
+    assert [table.item(0, c).text() for c in (1, 2)] == ["br s", ""]
+    assert table.item(1, 3).text() == "3"
+    assert "3.73 (br s, 1H)" in window.multiplets_panel.report.toPlainText()
+
+    table.item(1, 3).setText("many")  # rejected
+    assert table.item(1, 3).text() == "3"
+    table.item(0, 1).setText("")  # back to automatic
+    assert table.item(0, 1).text() == "q"
+
+    table.selectRow(1)
+    window.multiplets_panel.delete_button.click()
+    assert table.rowCount() == 1
+    window.undo_action.trigger()
+    assert table.rowCount() == 2
+    window.clear_multiplets_action.trigger()
+    assert table.rowCount() == 0 and len(window.plot.multiplets) == 0
+    assert window.multiplets_panel.report.toPlainText() == ""
+
+
+def test_integrals_set_the_scale_for_multiplet_nuclei(ibuprofen):
+    window = ibuprofen
+    window.plot.multiplet_selected.emit(2.50, 2.40)  # CH2
+    assert window.multiplets_panel.table.item(0, 3).text() == "1"  # alone: counts as one
+
+    window.plot.region_selected.emit(0.96, 0.84)  # the two methyl groups ...
+    window.integrals_panel.table.item(0, 2).setText("6")  # ... are six protons
+    assert window.multiplets_panel.table.item(0, 3).text() == "2"
+
+
+def test_multiplets_are_saved_with_the_project(ibuprofen, tmp_path, qtbot):
+    from nmr.gui.main_window import MainWindow
+
+    window = ibuprofen
+    window.plot.multiplet_selected.emit(0.84, 0.96)
+    window.plot.multiplet_selected.emit(3.76, 3.68)
+    window.multiplets_panel.table.item(0, 3).setText("2")
+    report = window.multiplets_panel.report.toPlainText()
+    assert window._save_to(tmp_path / "ibu.nmrx")
+
+    other = MainWindow()
+    qtbot.addWidget(other)
+    assert other.open_path(tmp_path / "ibu.nmrx")
+    assert other.multiplets == window.multiplets
+    assert other.multiplets_panel.report.toPlainText() == report
+    assert len(other.plot.multiplets) == 2

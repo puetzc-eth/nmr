@@ -113,6 +113,19 @@ ICONS = {
     "clear-integrals": (
         f'<path d="M12 4{_INTEGRAL}"/><path stroke="A" d="M15 14l5 5M20 14l-5 5"/>'
     ),
+    "multiplet": (
+        '<path d="M3 20h18"/>'
+        '<path stroke="A" d="M7 20v-6M12 20V6M17 20v-6"/>'
+        '<path d="M7 10V8h10v2M12 8V4"/>'
+    ),
+    "clear-multiplets": (
+        '<path d="M3 20h9M5 20v-5M9 20V8"/><path stroke="A" d="M15 14l5 5M20 14l-5 5"/>'
+    ),
+    "report": (
+        '<rect x="5" y="4" width="14" height="17" rx="2"/>'
+        '<path d="M9 4V3h6v1"/>'
+        '<path stroke="A" d="M8.5 10h7M8.5 13.5h7M8.5 17h4"/>'
+    ),
     # help
     "shortcuts": (
         '<rect x="2" y="6" width="20" height="12" rx="2"/>'

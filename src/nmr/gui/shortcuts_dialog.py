@@ -48,7 +48,9 @@ SHORTCUTS: list[tuple[str, list[tuple[str, str]]]] = [
         "Analysis",
         [
             ("I", "Integration: drag across a signal"),
-            ("Delete", "Remove the integral selected in the table"),
+            ("J", "Multiplet analysis: drag across a signal"),
+            ("Ctrl+Shift+C", "Copy the multiplet report"),
+            ("Delete", "Remove the integral or multiplet selected in its table"),
         ],
     ),
     (

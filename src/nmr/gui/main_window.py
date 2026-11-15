@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QMimeData, Qt
 from PySide6.QtGui import (
     QAction,
     QActionGroup,
@@ -23,6 +23,8 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QScrollArea,
+    QTabBar,
+    QTabWidget,
 )
 
 from nmr import __version__
@@ -31,6 +33,7 @@ from nmr.core.document import PROJECT_SUFFIX, Document, Entry
 from nmr.core.integration import IntegralSet, evaluate
 from nmr.core.io import LoadError
 from nmr.core.io.export import save_csv, save_jcamp
+from nmr.core.multiplets import MultipletSet, analyse, format_report
 from nmr.core.processing import (
     ProcessingParams,
     auto_phase,
@@ -40,6 +43,7 @@ from nmr.core.processing import (
 )
 from nmr.gui import icons
 from nmr.gui.integrals_panel import IntegralsPanel
+from nmr.gui.multiplets_panel import MultipletsPanel
 from nmr.gui.processing_panel import ProcessingPanel
 from nmr.gui.ribbon import Ribbon
 from nmr.gui.shortcuts_dialog import ShortcutsDialog
@@ -68,13 +72,17 @@ TOOL_HINTS = {
         "click to set the pivot. Hold Shift for fine steps."
     ),
     Tool.REFERENCE: "Reference: click a signal to set its chemical shift.",
+    Tool.MULTIPLET: (
+        "Multiplets: drag across a signal. Correct Type or Nuclei in the table, "
+        "select a row and press Delete to remove it."
+    ),
     Tool.INTEGRATE: (
         "Integrate: drag across a signal. Edit a value in the table to normalise, "
         "select a row and press Delete to remove it."
     ),
 }
 
-Snapshot = tuple[ProcessingParams, IntegralSet]
+Snapshot = tuple[ProcessingParams, IntegralSet, MultipletSet]
 
 
 @dataclass
@@ -113,6 +121,7 @@ class MainWindow(QMainWindow):
         self.plot.pivot_picked.connect(self._set_pivot)
         self.plot.reference_picked.connect(self._reference_at)
         self.plot.region_selected.connect(self._add_integral)
+        self.plot.multiplet_selected.connect(self._add_multiplet)
 
         self.spectra_panel = SpectraPanel()
         self.spectra_panel.current_changed.connect(self.select)
@@ -143,7 +152,30 @@ class MainWindow(QMainWindow):
         )
         self.integrals_panel.clear_requested.connect(lambda: self.set_integrals(IntegralSet()))
         self.integrals_dock = self._add_dock("INTEGRALS", self.integrals_panel)
-        self.resizeDocks([self.dock, self.integrals_dock], [460, 240], Qt.Orientation.Vertical)
+        self.multiplets_panel = MultipletsPanel()
+        self.multiplets_panel.setMinimumWidth(SIDEBAR_WIDTH)
+        self.multiplets_panel.pattern_changed.connect(
+            lambda row, pattern: self.set_multiplets(self.multiplets.edited(row, pattern=pattern))
+        )
+        self.multiplets_panel.nuclei_changed.connect(
+            lambda row, nuclei: self.set_multiplets(self.multiplets.edited(row, nuclei=nuclei))
+        )
+        self.multiplets_panel.delete_requested.connect(
+            lambda row: self.set_multiplets(self.multiplets.remove(row))
+        )
+        self.multiplets_panel.clear_requested.connect(lambda: self.set_multiplets(MultipletSet()))
+        self.multiplets_panel.copy_requested.connect(self.copy_report)
+        self.multiplets_dock = self._add_dock("MULTIPLETS", self.multiplets_panel)
+        # Integrals and multiplets share the lower right corner as two tabs.
+        self.tabifyDockWidget(self.integrals_dock, self.multiplets_dock)
+        self.setTabPosition(Qt.DockWidgetArea.RightDockWidgetArea, QTabWidget.TabPosition.North)
+        self.integrals_dock.raise_()
+        for bar in self.findChildren(QTabBar):
+            if bar.parent() is self:
+                # Show the full panel names instead of eliding them.
+                bar.setElideMode(Qt.TextElideMode.ElideNone)
+                bar.setExpanding(False)
+        self.resizeDocks([self.dock, self.integrals_dock], [340, 400], Qt.Orientation.Vertical)
 
         self._info = QLabel()
         self._hint = QLabel()
@@ -182,6 +214,10 @@ class MainWindow(QMainWindow):
     @property
     def integrals(self) -> IntegralSet:
         return self.entry.integrals if self.entry else IntegralSet()
+
+    @property
+    def multiplets(self) -> MultipletSet:
+        return self.entry.multiplets if self.entry else MultipletSet()
 
     # ---- documents ----------------------------------------------------------------------
 
@@ -353,6 +389,27 @@ class MainWindow(QMainWindow):
         self._refresh_integrals()
         self._update_enabled()
 
+    def set_multiplets(self, multiplets: MultipletSet, *, record: bool = True) -> None:
+        if self.entry is None or multiplets == self.multiplets:
+            return
+        if record:
+            self._record_undo()
+        self.entry.multiplets = multiplets
+        self._set_modified(True)
+        self._refresh_multiplets()
+        self._update_enabled()
+
+    def copy_report(self) -> None:
+        """Put the multiplet report on the clipboard, as plain and as rich text."""
+        results = self._analysed_multiplets()
+        if not results:
+            return
+        data = QMimeData()
+        data.setText(format_report(self.spectrum, results))
+        data.setHtml(format_report(self.spectrum, results, html=True))
+        QApplication.clipboard().setMimeData(data)
+        self._hint.setText("Multiplet report copied to the clipboard.")
+
     def undo(self) -> None:
         self._step_history(back=True)
 
@@ -365,8 +422,9 @@ class MainWindow(QMainWindow):
         session = _session(self.entry)
         source, target = (session.undo, session.redo) if back else (session.redo, session.undo)
         if source:
-            target.append((self.params, self.integrals))
-            self.entry.params, self.entry.integrals = source.pop()
+            target.append((self.params, self.integrals, self.multiplets))
+            entry = self.entry
+            entry.params, entry.integrals, entry.multiplets = source.pop()
             self._set_modified(True)
             self._reprocess(keep_view=True)
 
@@ -374,7 +432,7 @@ class MainWindow(QMainWindow):
         if self.entry is None:
             return
         session = _session(self.entry)
-        session.undo.append((self.params, self.integrals))
+        session.undo.append((self.params, self.integrals, self.multiplets))
         session.redo.clear()
         self._update_enabled()
 
@@ -414,8 +472,10 @@ class MainWindow(QMainWindow):
             self.plot.clear_dataset()
             self.plot.set_pivot(None)
             self.plot.integrals.set(None, [])
+            self.plot.multiplets.set([])
             self.panel.setEnabled(False)
             self.integrals_panel.set_integrals([], 0)
+            self.multiplets_panel.set_multiplets([], "")
             self._info.setText("No data loaded")
             self._cursor.clear()
         else:
@@ -428,6 +488,7 @@ class MainWindow(QMainWindow):
 
     def _refresh_plot(self, *, keep_view: bool) -> None:
         shown = self.dataset if self.show_fid_action.isChecked() else self.spectrum
+        self.plot.reserve_label_band = bool(self.multiplets.regions)
         self.plot.set_dataset(shown, keep_view=keep_view)
         self._info.setText(_describe(shown))
         self._cursor.clear()
@@ -440,6 +501,25 @@ class MainWindow(QMainWindow):
             self.plot.integrals.set(self.spectrum, results)
         else:
             self.plot.integrals.set(None, [])
+        # The integrals set the scale for the nuclei counts of the multiplets.
+        self._refresh_multiplets()
+
+    def _analysed_multiplets(self) -> list:
+        if self.spectrum is None:
+            return []
+        per_nucleus = None
+        integrals = evaluate(self.spectrum, self.integrals)
+        if integrals and integrals[0].value:
+            per_nucleus = integrals[0].area / integrals[0].value
+        return analyse(self.spectrum, self.multiplets, per_nucleus)
+
+    def _refresh_multiplets(self) -> None:
+        results = self._analysed_multiplets()
+        report = format_report(self.spectrum, results) if results else ""
+        self.multiplets_panel.set_multiplets(results, report)
+        self.plot.reserve_label_band = bool(results)
+        element = self.spectrum.nucleus.lstrip("0123456789") if self.spectrum else "H"
+        self.plot.multiplets.set(results if self._showing_spectrum else [], element)
 
     @property
     def _showing_spectrum(self) -> bool:
@@ -497,7 +577,13 @@ class MainWindow(QMainWindow):
             # The integration regions move along with the axis, as one undo step.
             self._record_undo()
             self.entry.integrals = self.integrals.shifted(value - peak)
+            self.entry.multiplets = self.multiplets.shifted(value - peak)
             self.set_params(shift_reference(self.params, value - peak), record=False)
+
+    def _add_multiplet(self, a_ppm: float, b_ppm: float) -> None:
+        if self._showing_spectrum:
+            self.set_multiplets(self.multiplets.add(a_ppm, b_ppm))
+            self.multiplets_dock.raise_()
 
     def _add_integral(self, a_ppm: float, b_ppm: float) -> None:
         if self._showing_spectrum:
@@ -586,6 +672,7 @@ class MainWindow(QMainWindow):
             (Tool.PHASE, "&Manual Phase", "Shift+P", "Manual phase correction"),
             (Tool.REFERENCE, "&Reference", "L", "Set the chemical shift reference"),
             (Tool.INTEGRATE, "&Integrate", "I", "Manual integration: drag across a signal"),
+            (Tool.MULTIPLET, "&Multiplets", "J", "Multiplet analysis: drag across a signal"),
         ]
         group = QActionGroup(self)
         self.tool_actions: dict[Tool, QAction] = {}
@@ -618,6 +705,12 @@ class MainWindow(QMainWindow):
         )
         self.clear_integrals_action = self._action(
             "&Delete All Integrals", lambda: self.set_integrals(IntegralSet())
+        )
+        self.clear_multiplets_action = self._action(
+            "Delete All &Multiplets", lambda: self.set_multiplets(MultipletSet())
+        )
+        self.copy_report_action = self._action(
+            "Copy Multiplet &Report", self.copy_report, "Ctrl+Shift+C"
         )
         self.shortcuts_action = self._action("&Keyboard Shortcuts", self._show_shortcuts, "F1")
         self.about_action = self._action("&About nmr", self._show_about)
@@ -662,14 +755,19 @@ class MainWindow(QMainWindow):
         reference = use(tool[Tool.REFERENCE], "reference", "Reference")
         integrate = use(tool[Tool.INTEGRATE], "integrate", "Integrate")
         clear = use(self.clear_integrals_action, "clear-integrals", "Delete all")
+        multiplet = use(tool[Tool.MULTIPLET], "multiplet", "Multiplets")
+        clear_multiplets = use(self.clear_multiplets_action, "clear-multiplets", "Delete all")
+        report = use(self.copy_report_action, "report", "Copy report")
         shortcuts = use(self.shortcuts_action, "shortcuts", "Shortcuts")
         about = use(self.about_action, "about", "About")
         panels = [
             use(self.spectra_dock.toggleViewAction(), "panel-left", "Spectra"),
             use(self.dock.toggleViewAction(), "panel-right", "Processing"),
             use(self.integrals_dock.toggleViewAction(), "panel-table", "Integrals"),
+            use(self.multiplets_dock.toggleViewAction(), "panel-table", "Multiplets"),
         ]
-        for action, name in zip(panels, ("spectra", "processing", "integrals"), strict=True):
+        names = ("spectra", "processing", "integrals", "multiplets")
+        for action, name in zip(panels, names, strict=True):
             action.setToolTip(f"Show or hide the {name} panel")
 
         pages = {
@@ -679,7 +777,8 @@ class MainWindow(QMainWindow):
                 [undo, redo, copy],
                 [select, zoom, pan, crosshair],
                 [full, fit],
-                [auto_phase_, reference, integrate],
+                [auto_phase_, reference],
+                [integrate, multiplet, report],
             ],
             "&View": [
                 [select, zoom, zoom_out, pan, crosshair],
@@ -689,7 +788,7 @@ class MainWindow(QMainWindow):
                 panels,
             ],
             "&Processing": [[auto_phase_, phase], [reference], [fid]],
-            "&Analysis": [[integrate, clear]],
+            "&Analysis": [[integrate, clear], [multiplet, clear_multiplets, report]],
             "H&elp": [[shortcuts, about]],
         }
         self.ribbon = Ribbon()
@@ -714,6 +813,7 @@ class MainWindow(QMainWindow):
             self.smaller_action,
             self.tool_actions[Tool.REFERENCE],
             self.tool_actions[Tool.INTEGRATE],
+            self.tool_actions[Tool.MULTIPLET],
             *self.export_actions,
         ):
             action.setEnabled(loaded)
@@ -723,6 +823,8 @@ class MainWindow(QMainWindow):
         self.previous_action.setEnabled(self.current > 0)
         self.next_action.setEnabled(0 <= self.current < count - 1)
         self.clear_integrals_action.setEnabled(bool(self.integrals.ranges))
+        self.clear_multiplets_action.setEnabled(bool(self.multiplets.regions))
+        self.copy_report_action.setEnabled(bool(self.multiplets.regions))
         self.show_fid_action.setEnabled(is_fid)
         self.auto_phase_action.setEnabled(complex_data)
         self.tool_actions[Tool.PHASE].setEnabled(complex_data)

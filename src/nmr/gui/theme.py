@@ -15,6 +15,7 @@ ACCENT_LINE = "#bfdbfe"
 SPECTRUM = "#1e3a8a"
 PIVOT = "#ea580c"
 INTEGRAL = "#059669"
+MULTIPLET = "#7c3aed"
 CROSSHAIR = "#64748b"
 AXIS = "#475569"
 TEXT = "#0f172a"
@@ -52,6 +53,14 @@ QToolButton#ribbonButton:disabled {{ color: {FAINT}; }}
 QFrame#ribbonSeparator {{ background: {BORDER}; margin: 8px 7px; }}
 
 /* ---- side panels ---- */
+QMainWindow > QTabBar {{ background: {SURFACE}; }}
+QMainWindow > QTabBar::tab {{ background: transparent; color: {MUTED}; border: none;
+    border-bottom: 2px solid transparent; padding: 8px 12px 5px 12px; margin-left: 4px;
+    font-weight: 600; font-size: 11px; }}
+QMainWindow > QTabBar::tab:hover {{ color: {TEXT}; }}
+QMainWindow > QTabBar::tab:selected {{ color: {ACCENT}; border-bottom: 2px solid {ACCENT}; }}
+QPlainTextEdit {{ background: white; border: 1px solid {BORDER}; border-radius: 10px;
+    padding: 6px; color: {TEXT}; selection-background-color: {ACCENT}; }}
 QDockWidget {{ color: {MUTED}; font-weight: 600; font-size: 11px; }}
 QDockWidget::title {{ background: {SURFACE}; padding: 12px 14px 6px 14px; }}
 QMainWindow::separator {{ background: {SURFACE}; width: 5px; height: 5px; }}

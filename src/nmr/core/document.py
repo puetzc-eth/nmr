@@ -31,6 +31,7 @@ from nmr import __version__
 from nmr.core.dataset import Dataset
 from nmr.core.integration import IntegralSet
 from nmr.core.io import LoadError, find_datasets, load, origin_of
+from nmr.core.multiplets import MultipletSet, Region
 from nmr.core.processing import ProcessingParams, auto_phase, default_params
 
 PROJECT_SUFFIX = ".nmrx"
@@ -53,6 +54,7 @@ class Entry:
     """Name of this entry's folder in the workspace and in the project file."""
     load_path: str
     """Path below `<folder>/data` that is handed to the loader."""
+    multiplets: MultipletSet = field(default_factory=MultipletSet)
     runtime: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     """Scratch space for the application (caches, undo history). Never saved."""
 
@@ -155,6 +157,7 @@ class Document:
                     state = {
                         "processing": asdict(entry.params),
                         "integrals": asdict(entry.integrals),
+                        "multiplets": asdict(entry.multiplets),
                     }
                     archive.writestr(f"{entry.folder}/{STATE}", json.dumps(state, indent=2))
                     data_dir = self._root / entry.folder / "data"
@@ -204,11 +207,12 @@ class Document:
                 state = json.loads((self._root / folder / STATE).read_text(encoding="utf-8"))
                 params = _from_dict(ProcessingParams, state.get("processing", {}))
                 integrals = _integrals_from_dict(state.get("integrals", {}))
-            except (OSError, ValueError, TypeError, AttributeError) as exc:
+                multiplets = _multiplets_from_dict(state.get("multiplets", {}))
+            except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
                 raise LoadError(
                     f"{path.name} is damaged: unreadable settings for {folder}."
                 ) from exc
-            self.entries.append(Entry(dataset, params, integrals, folder, load_path))
+            self.entries.append(Entry(dataset, params, integrals, folder, load_path, multiplets))
             self._counter = max(self._counter, int(folder))
 
 
@@ -225,6 +229,16 @@ def _from_dict(cls, values: dict):
     """Build a settings object, ignoring keys this version does not know."""
     known = {f.name for f in fields(cls)}
     return cls(**{key: value for key, value in values.items() if key in known})
+
+
+def _multiplets_from_dict(values: dict) -> MultipletSet:
+    regions = []
+    for item in values.get("regions", []):
+        region = _from_dict(Region, item)
+        nuclei = None if region.nuclei is None else int(region.nuclei)
+        pattern = None if region.pattern is None else str(region.pattern)
+        regions.append(Region(float(region.high_ppm), float(region.low_ppm), pattern, nuclei))
+    return MultipletSet(tuple(regions))
 
 
 def _integrals_from_dict(values: dict) -> IntegralSet:

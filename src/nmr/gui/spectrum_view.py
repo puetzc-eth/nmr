@@ -11,6 +11,7 @@ from PySide6.QtWidgets import QLabel
 from nmr.core.dataset import Dataset
 from nmr.gui import theme
 from nmr.gui.integral_layer import IntegralLayer
+from nmr.gui.multiplet_layer import BAND_PX, MultipletLayer
 
 _SUPERSCRIPT = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
 
@@ -34,6 +35,7 @@ class Tool(Enum):
     PHASE = "phase"
     REFERENCE = "reference"
     INTEGRATE = "integrate"
+    MULTIPLET = "multiplet"
 
 
 ZOOM_MODES = ("horizontal", "vertical", "box")
@@ -47,6 +49,7 @@ _CURSORS = {
     Tool.PHASE: Qt.CursorShape.SizeVerCursor,
     Tool.REFERENCE: Qt.CursorShape.PointingHandCursor,
     Tool.INTEGRATE: Qt.CursorShape.SplitHCursor,
+    Tool.MULTIPLET: Qt.CursorShape.SplitHCursor,
 }
 
 
@@ -79,6 +82,8 @@ class SpectrumView(pg.PlotWidget):
     reference_picked = Signal(float)
     region_selected = Signal(float, float)
     """Both ends of a region dragged with the integrate tool."""
+    multiplet_selected = Signal(float, float)
+    """Both ends of a region dragged with the multiplet tool."""
 
     def __init__(self) -> None:
         view_box = _ViewBox()
@@ -130,6 +135,9 @@ class SpectrumView(pg.PlotWidget):
         self._hint.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
         self.integrals = IntegralLayer(self)
+        self.multiplets = MultipletLayer(self)
+        self.reserve_label_band = False
+        """Keep the top of the plot free for multiplet labels when fitting."""
         self.scene().sigMouseMoved.connect(self._on_mouse_moved)
 
     # ---- data -------------------------------------------------------------------
@@ -184,8 +192,13 @@ class SpectrumView(pg.PlotWidget):
             return
         top, bottom = float(visible.max()), min(float(visible.min()), 0.0)
         span = max(top - bottom, 1e-12)
-        # The room below the baseline holds the integral labels.
-        self.vb.setRange(yRange=(bottom - 0.09 * span, top + 0.06 * span), padding=0)
+        # The room below the baseline holds the integral labels, the strip at the
+        # top the multiplet labels.
+        headroom = 0.06
+        if self.reserve_label_band and self.vb.height() > 2 * BAND_PX:
+            band = (BAND_PX + 12) / self.vb.height()
+            headroom = band / (1 - band) * 1.09
+        self.vb.setRange(yRange=(bottom - 0.09 * span, top + headroom * span), padding=0)
 
     def scale_intensity(self, factor: float) -> None:
         """Multiply the displayed intensity; the zero line stays where it is."""
@@ -252,6 +265,10 @@ class SpectrumView(pg.PlotWidget):
             self._drag_zoom(ev)
         elif self.tool is Tool.INTEGRATE:
             self._drag_integrate(ev)
+        elif self.tool is Tool.MULTIPLET:
+            target = self._drag_band(ev, horizontal=True, vertical=False)
+            if target is not None:
+                self.multiplet_selected.emit(target.left(), target.right())
         elif self.tool is Tool.CROSSHAIR:
             self._drag_measure(ev)
         elif self.tool in (Tool.SELECT, Tool.PAN):
